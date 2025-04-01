@@ -84,8 +84,9 @@ const bodyParser = require('body-parser');
 const app = express();
 app.use(bodyParser.json());
 
-const usersSession = {}; // Store active sessions
+const usersSession = {}; // Track user sessions
 
+// Menu Items
 const MENU_ITEMS = {
     1: { name: "Pani Puri", price: 20 },
     2: { name: "Bhel Puri", price: 30 },
@@ -96,20 +97,42 @@ const MENU_ITEMS = {
 // WhatsApp API URL
 const WHATSAPP_URL = `https://graph.facebook.com/v21.0/${process.env.PHONE_NUMBER_ID}/messages`;
 
+// Function to send a message via WhatsApp API
 async function sendMessage(to, message) {
-    await axios.post(WHATSAPP_URL, {
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body: message }
-    }, {
-        headers: {
-            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-            "Content-Type": "application/json"
-        }
-    });
+    try {
+        await axios.post(WHATSAPP_URL, {
+            messaging_product: "whatsapp",
+            to,
+            type: "text",
+            text: { body: message }
+        }, {
+            headers: {
+                Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                "Content-Type": "application/json"
+            }
+        });
+    } catch (error) {
+        console.error("Error sending message:", error.response?.data || error.message);
+    }
 }
 
+// Default Greeting Message
+async function sendGreetingMessage(to) {
+    const message = `🌟 *Welcome to Puchka Das!* 🌟\n\n🍽️ Type *menu* to see our delicious items.\n🛍️ Type *help* for instructions.`;
+    await sendMessage(to, message);
+}
+
+// Generate Menu Message
+function getMenuMessage() {
+    let menuMessage = "🍽️ *Menu:*\n";
+    for (let id in MENU_ITEMS) {
+        menuMessage += `*${id}*. ${MENU_ITEMS[id].name} - ₹${MENU_ITEMS[id].price}\n`;
+    }
+    menuMessage += "\n🛒 To order, type: <index> <quantity> (e.g., *1 2* for 2 Pani Puris)\n\n✅ Type *done* to confirm order.";
+    return menuMessage;
+}
+
+// WhatsApp Webhook Verification
 app.get('/webhook', (req, res) => {
     if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
         res.send(req.query["hub.challenge"]);
@@ -118,6 +141,7 @@ app.get('/webhook', (req, res) => {
     }
 });
 
+// Handling WhatsApp Messages
 app.post('/webhook', async (req, res) => {
     const messageData = req.body;
 
@@ -128,22 +152,24 @@ app.post('/webhook', async (req, res) => {
                 const from = message.from;
                 const text = message.text?.body?.toLowerCase().trim();
 
+                // **1️⃣ New User - Send Greeting Message**
                 if (!usersSession[from]) {
                     usersSession[from] = { stage: "greeting", order: [] };
-                    await sendMessage(from, `🌟 *Welcome to Puchka Das!* 🌟\n\n🍽️ Type *menu* to see our delicious items.`);
+                    await sendGreetingMessage(from);
                     continue;
                 }
 
+                // **2️⃣ User Requests Menu**
                 if (text === "menu") {
-                    let menuMessage = "🍽️ Menu:\n";
-                    for (let id in MENU_ITEMS) {
-                        menuMessage += `*${id}*. ${MENU_ITEMS[id].name} - ₹${MENU_ITEMS[id].price}\n`;
-                    }
-                    menuMessage += "\n🛒 To order, type: <index> <quantity> (e.g., 1 2 for 2 Pani Puris)";
                     usersSession[from].stage = "ordering";
-                    await sendMessage(from, menuMessage);
-                } else if (usersSession[from].stage === "ordering") {
+                    await sendMessage(from, getMenuMessage());
+                    continue;
+                }
+
+                // **3️⃣ User is Ordering**
+                if (usersSession[from].stage === "ordering") {
                     const orderMatch = text.match(/^(\d+)\s+(\d+)$/);
+                    
                     if (orderMatch) {
                         const index = parseInt(orderMatch[1]);
                         const quantity = parseInt(orderMatch[2]);
@@ -152,11 +178,16 @@ app.post('/webhook', async (req, res) => {
                             usersSession[from].order.push({ item: MENU_ITEMS[index], quantity });
                             await sendMessage(from, `✅ *${quantity}x ${MENU_ITEMS[index].name}* added to your cart.\n\n🛍️ Type *done* to confirm or *menu* to add more.`);
                         } else {
-                            await sendMessage(from, "❌ Invalid item index. Type menu to see available items.");
+                            await sendMessage(from, "❌ Invalid item number. Type *menu* to see available items.");
                         }
                     } else if (text === "done") {
+                        if (usersSession[from].order.length === 0) {
+                            await sendMessage(from, "🛒 Your cart is empty! Please add items before confirming.");
+                            continue;
+                        }
+
                         let totalAmount = 0;
-                        let orderSummary = "🛒 Your Order Summary:\n";
+                        let orderSummary = "🛒 *Your Order Summary:*\n";
                         usersSession[from].order.forEach(order => {
                             orderSummary += `- ${order.quantity}x ${order.item.name} - ₹${order.item.price * order.quantity}\n`;
                             totalAmount += order.item.price * order.quantity;
@@ -164,18 +195,20 @@ app.post('/webhook', async (req, res) => {
                         orderSummary += `\n💰 *Total: ₹${totalAmount}*\n\n🎉 Thank you for ordering from *Puchka Das*! 🎊`;
 
                         await sendMessage(from, orderSummary);
-
                         delete usersSession[from]; // Reset session
                     } else {
-                        await sendMessage(from, "❌ Invalid format. Use <index> <quantity> (e.g., 1 2) or type done to finish.");
+                        await sendMessage(from, "❌ Invalid input. Use *<index> <quantity>* (e.g., *1 2*) or type *done* to finish.");
                     }
-                } else {
-                    await sendMessage(from, "🤖 I didn't understand. Type menu to see options.");
+                    continue;
                 }
+
+                // **4️⃣ Unrecognized Message**
+                await sendMessage(from, "🤖 I didn't understand. Type *menu* to see options.");
             }
         }
     }
     res.sendStatus(200);
 });
 
+// Start Server
 app.listen(3000, () => console.log("🚀 WhatsApp bot running on port 3000"));
